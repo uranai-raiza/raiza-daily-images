@@ -1,0 +1,49 @@
+name: 21:00 clock
+
+# 非公開の投稿リポジトリに、毎晩21:00ちょうどに合図を送る時計係。
+# GitHubの定時実行は数時間遅れることがあるので、早めに起きて21:00まで待つ（公開リポジトリは待ち時間が無料）。
+# 2回起きるのは、1回目が大きく遅れたときの保険。2回目は合図が送られていれば何もしない。
+on:
+  schedule:
+    - cron: "23 7 * * *"   # 16:23 JST
+    - cron: "47 9 * * *"   # 18:47 JST
+  workflow_dispatch:
+
+concurrency:
+  group: clock
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Wait until 21:00 JST and send the signal
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.POST_REPO_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/post_key
+          chmod 600 ~/.ssh/post_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/post_key -o IdentitiesOnly=yes"
+
+          now=$(date +%s)
+          today=$(TZ=Asia/Tokyo date +%F)
+          target=$(TZ=Asia/Tokyo date -d "$today 21:00" +%s)
+          if (( now > target + 3*3600 )); then echo "21:00を3時間以上過ぎたので合図を送りません"; exit 0; fi
+          if (( now < target )); then echo "21:00まで $(( target - now )) 秒待ちます"; sleep $(( target - now )); fi
+
+          # 合図は「mainの最新＋日付を書いたファイル」を trigger ブランチに置くこと（投稿の手順書はmainのものが使われる）
+          git clone -q --depth 1 --branch main git@github.com:uranai-raiza/uranai-raiza-daily-post.git sig
+          cd sig
+          if git fetch -q --depth 1 origin trigger 2>/dev/null && [[ "$(git show FETCH_HEAD:signal/last.txt 2>/dev/null)" == "$today" ]]; then
+            echo "今日の合図は送信済みです"; exit 0
+          fi
+          mkdir -p signal
+          echo "$today" > signal/last.txt
+          git add signal/last.txt
+          git -c user.name=raiza-clock -c user.email=actions@users.noreply.github.com commit -q -m "signal: $today 21:00"
+          git push -q -f origin HEAD:trigger
+          echo "合図を送りました: $(TZ=Asia/Tokyo date '+%F %T')"
